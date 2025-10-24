@@ -1,99 +1,88 @@
 import asyncio
-
 import json
-
+import os
+import time
 from playwright.async_api import async_playwright
 
-# -------- CONFIG FILES --------
+# ========== SAFE FILE READERS ==========
+def safe_read(path, default=""):
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            return f.read().strip()
+    except Exception:
+        return default
 
-COOKIES_FILE = 'cookies.json'     # Your cookies/AppState
+def safe_read_lines(path):
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            return [line.strip() for line in f.readlines() if line.strip()]
+    except Exception:
+        return []
 
-TID_FILE = 'tid.txt'              # Thread IDs (one per line)
+# ========== CONFIG FILES ==========
+THREAD_ID = safe_read("tid.txt")
+INTERVAL = float(safe_read("time.txt", "5"))
+PREFIX = safe_read("prefix.txt")
+MESSAGES = safe_read_lines("messages.txt")
 
-TIME_FILE = 'time.txt'            # Interval per thread (seconds, one per line)
+# ========== COOKIE HANDLING ==========
+if not os.path.exists("cookies.json") or os.stat("cookies.json").st_size == 0:
+    print("⚠️ cookies.json missing or empty! Please upload valid cookies.")
+    COOKIES = []
+else:
+    try:
+        with open("cookies.json", "r", encoding="utf-8") as f:
+            COOKIES = json.load(f)
+    except json.JSONDecodeError:
+        print("⚠️ Invalid JSON in cookies.json! Using empty cookie list.")
+        COOKIES = []
 
-PREFIX_FILE = 'prefix.txt'        # Optional prefixes (one per line, empty line = no prefix)
-
-MESSAGES_FILE = 'messages.txt'    # Messages to send
-
-# -------- LOAD FILES --------
-
-with open(COOKIES_FILE, 'r', encoding='utf-8') as f:
-
-    cookies = json.load(f)
-
-with open(TID_FILE, 'r', encoding='utf-8') as f:
-
-    thread_ids = [line.strip() for line in f if line.strip()]
-
-with open(TIME_FILE, 'r', encoding='utf-8') as f:
-
-    intervals = [int(line.strip()) for line in f if line.strip()]
-
-with open(PREFIX_FILE, 'r', encoding='utf-8') as f:
-
-    prefixes = [line.strip() for line in f]
-
-with open(MESSAGES_FILE, 'r', encoding='utf-8') as f:
-
-    messages = [line.strip() for line in f if line.strip()]
-
-# -------- ASYNC FUNCTION TO SEND MESSAGES TO ONE THREAD --------
-
-async def send_to_thread(thread_id, interval, prefix):
-
+# ========== MAIN BOT ==========
+async def run_bot():
     async with async_playwright() as p:
-
-        browser = await p.chromium.launch(headless=False)  # set True to run headless
-
+        browser = await p.chromium.launch(headless=True)
         context = await browser.new_context()
 
-        await context.add_cookies(cookies)
-
+        if COOKIES:
+            await context.add_cookies(COOKIES)
         page = await context.new_page()
 
-        await page.goto(f'https://www.facebook.com/messages/e2ee/t/{thread_id}')
+        print("🌐 Logging in to Messenger...")
+        await page.goto("https://www.facebook.com/messages")
+        await page.wait_for_timeout(5000)
 
-        await page.wait_for_selector('div[role="textbox"]')
+        if "login" in page.url.lower():
+            print("❌ Login failed — invalid cookies.")
+            await browser.close()
+            return
 
-        print(f'✅ Started sending messages to thread {thread_id}')
+        print("✅ Logged in successfully!")
+
+        if not THREAD_ID:
+            print("❌ tid.txt is empty! Add your E2EE thread ID (e.g. 1234567890).")
+            await browser.close()
+            return
+
+        url = f"https://www.facebook.com/messages/e2ee/t/{THREAD_ID}"
+        await page.goto(url)
+        print(f"📨 Chat opened: {THREAD_ID}")
 
         while True:
-
-            for message in messages:
-
-                msg = f'{prefix} {message}'.strip()
-
+            for msg in MESSAGES:
+                full_msg = f"{PREFIX} {msg}".strip()
                 try:
-
-                    await page.fill('div[role="textbox"]', msg)
-
-                    await page.keyboard.press('Enter')
-
-                    print(f'Sent to {thread_id}: {msg[:50]}')
-
+                    await page.fill('div[role="textbox"]', full_msg)
+                    await page.keyboard.press("Enter")
+                    print(f"✅ Sent: {full_msg[:40]}")
                 except Exception as e:
+                    print(f"⚠️ Send error: {e}")
+                await asyncio.sleep(INTERVAL)
 
-                    print(f'❌ Error sending to {thread_id}: {e}')
-
-                await asyncio.sleep(interval)
-
-# -------- MAIN FUNCTION TO START ALL THREADS --------
-
-async def main():
-
-    tasks = []
-
-    for i, thread_id in enumerate(thread_ids):
-
-        interval = intervals[i] if i < len(intervals) else 5
-
-        prefix = prefixes[i] if i < len(prefixes) else ''
-
-        tasks.append(asyncio.create_task(send_to_thread(thread_id, interval, prefix)))
-
-    await asyncio.gather(*tasks)
-
-# -------- RUN --------
-
-asyncio.run(main())
+# ========== EXECUTION ==========
+if __name__ == "__main__":
+    try:
+        asyncio.run(run_bot())
+    except KeyboardInterrupt:
+        print("🛑 Bot stopped by user.")
+    except Exception as e:
+        print(f"🔥 Fatal error: {e}")
